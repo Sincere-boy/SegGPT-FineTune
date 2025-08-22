@@ -14,6 +14,9 @@ log.txt
 log*.txt
 *log.txt
 
+*.safetensors
+*.xz
+
 *.pth
 *.pt
 *.png
