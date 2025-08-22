@@ -49,6 +49,9 @@ python train.py --config <path_to_json_config>
 ```
 The training uses DDP strategy and utilizes all available GPUs by default. You can specify the GPU to use by setting `CUDA_VISIBLE_DEVICES` in the environment variable.
 
+### Training a pruned model
+If you have pruned SegGPT and saved it with `show_cosine.py`, set the `pruned_dir` field in the config to the directory containing the pruned weights (`pytorch_model.bin` and `keep_indices.json`). The training script will load this structure instead of the full model.
+
 You can also launch tensorboard to monitor the training progress:
 ```bash
 tensorboard --logdir logs
