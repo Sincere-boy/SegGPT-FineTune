@@ -12,6 +12,7 @@ from utils import *
 from torch.distributed import init_process_group, destroy_process_group
 from torch.utils.data.distributed import DistributedSampler
 from SegGPT.SegGPT_inference.models_seggpt import seggpt_vit_large_patch16_input896x448
+from pruning_utils import load_pruned_checkpoint
 from data import BaseDataset
 
 def ddp_setup(rank: int, world_size: int, port:int=None):
@@ -51,9 +52,14 @@ def main(rank: int, world_size: int, train_args: Dict, port: int):
     logger.info('Instantiating model and trainer agent')
 
     model = seggpt_vit_large_patch16_input896x448()
-    initial_ckpt = T.load('seggpt_vit_large.pth', map_location='cpu')
-    model.load_state_dict(initial_ckpt['model'], strict=False)
-    logger.info('Initial checkpoint loaded')
+    pruned_dir = train_args.get('pruned_dir')
+    if pruned_dir:
+        model = load_pruned_checkpoint(model, pruned_dir)
+        logger.info(f'Loaded pruned checkpoint from {pruned_dir}')
+    else:
+        initial_ckpt = T.load('seggpt_vit_large.pth', map_location='cpu')
+        model.load_state_dict(initial_ckpt['model'], strict=False)
+        logger.info('Initial checkpoint loaded')
 
     trainer = Agent(model, rank, train_args)
     logger.info(f'Using {T.cuda.device_count()} GPU(s)')
