@@ -264,6 +264,8 @@ class SegGPT(nn.Module):
              out_feature="last_feat",
              decoder_embed_dim=128,
              loss_func="smoothl1",
+             # 新增：由配置驱动要收集的中间层索引（影响 decoder 输入维）
+             intermediate_hidden_state_indices=None,
              ):
         super().__init__()
 
@@ -324,11 +326,28 @@ class SegGPT(nn.Module):
             trunc_normal_(self.pos_embed, std=0.02)
         self.norm = norm_layer(embed_dim)
 
+        # ----------------- 关键补充：收集中间层索引 & decoder 输入维 -----------------
+        default_collect = (5, 11, 17, 23)
+        if intermediate_hidden_state_indices is None:
+            collect = default_collect
+        else:
+            # 清洗：转 int、去重、排序、裁到合法范围
+            collect = tuple(sorted(set(int(i) for i in intermediate_hidden_state_indices if 0 <= int(i) < depth)))
+            # 防御：如果一个都没命中，至少保留最后一层
+            if len(collect) == 0:
+                fallback = default_collect[-1] if default_collect[-1] < depth else (depth - 1)
+                collect = (fallback,)
+
+        self.collect_indices = collect
+        self.num_collect = len(self.collect_indices)
         # --------------------------------------------------------------------------
 
         # --------------------------------------------------------------------------
         self.decoder_embed_dim = decoder_embed_dim
-        self.decoder_embed = nn.Linear(embed_dim*4, patch_size ** 2 * self.decoder_embed_dim, bias=True)  # decoder to patch
+        # ❗ 用 embed_dim * num_collect，替代原本写死的 embed_dim*4
+        in_feat = embed_dim * self.num_collect
+        out_feat = patch_size ** 2 * self.decoder_embed_dim
+        self.decoder_embed = nn.Linear(in_feat, out_feat, bias=True)  # decoder to patch
         self.decoder_pred = nn.Sequential(
                 nn.Conv2d(self.decoder_embed_dim, self.decoder_embed_dim, kernel_size=3, padding=1, ),
                 LayerNorm2D(self.decoder_embed_dim),
@@ -429,7 +448,8 @@ class SegGPT(nn.Module):
             x = blk(x, merge=merge)
             if idx == merge_idx:
                 x = (x[:x.shape[0]//2] + x[x.shape[0]//2:]) * 0.5
-            if idx in [5, 11, 17, 23]:
+            # 用可配置的 collect_indices，替代硬编码 [5, 11, 17, 23]
+            if idx in self.collect_indices:
                 out.append(self.norm(x))
         return out
 
@@ -477,6 +497,23 @@ class SegGPT(nn.Module):
         pred = self.forward_decoder(latent)  # [N, L, p*p*3]
         loss = self.forward_loss(pred, tgts, bool_masked_pos, valid)
         return loss, self.patchify(pred), bool_masked_pos
+
+    # 方便剪枝后自适配：更新收集索引并重建 decoder 输入维
+    def adapt_collect_indices(self, new_indices):
+        collect = tuple(sorted(set(int(i) for i in new_indices if 0 <= int(i) < len(self.blocks))))
+        if len(collect) == 0:
+            collect = (len(self.blocks) - 1,)
+        if collect != getattr(self, "collect_indices", None):
+            self.collect_indices = collect
+            self.num_collect = len(collect)
+            embed_dim = self._out_feature_channels[self._out_features[0]]
+            in_feat = embed_dim * self.num_collect
+            out_feat = (self.patch_size ** 2) * self.decoder_embed_dim
+            if not isinstance(self.decoder_embed, nn.Linear) or self.decoder_embed.in_features != in_feat:
+                self.decoder_embed = nn.Linear(in_feat, out_feat, bias=True)
+                nn.init.xavier_uniform_(self.decoder_embed.weight)
+                if self.decoder_embed.bias is not None:
+                    nn.init.zeros_(self.decoder_embed.bias)
 
 
 

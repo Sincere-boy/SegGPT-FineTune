@@ -5,7 +5,7 @@
     "cycle_steps": 5000,
     "warmup_steps": 500,
     "min_lr": 0.00000001,
-    "batch_size": 6,
+    "batch_size": 3,
     "epoch": 10,
     "log_dir": "logs",
     "train_dataset_dir": "./data/train",
