@@ -186,7 +186,10 @@ class BaseDataset(torch.utils.data.Dataset):
         
         img = self._to_img_tensor(img)
         label = self._to_img_tensor(label)
-        ori_label = torch.FloatTensor(ori_label)
+        # 归一化 label 到 0/1，保证和 n_classes 对齐
+        ori_label = (ori_label > 127).astype(np.uint8)  
+        ori_label = torch.LongTensor(ori_label)
+
         
         if not self.is_train:
             is_half = True

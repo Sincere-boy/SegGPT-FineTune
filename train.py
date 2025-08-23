@@ -16,6 +16,8 @@ from torch.utils.data.distributed import DistributedSampler
 from SegGPT.SegGPT_inference.models_seggpt import seggpt_vit_large_patch16_input896x448
 from pruning_utils import load_pruned_checkpoint
 from data import BaseDataset
+from hf_keymap import map_hf_key_to_custom
+
 
 
 def ddp_setup(rank: int, world_size: int, port:int=None):
@@ -35,46 +37,31 @@ from SegGPT.SegGPT_inference.models_seggpt import SegGPT
 def strip_prefix(k: str, prefix: str) -> str:
     return k[len(prefix):] if k.startswith(prefix) else k
 
-def map_hf_key_to_custom(hf_key: str) -> Optional[str]:
-    """
-    把 HF Transformers 的 key，映射到你自定义实现的 key。
-    返回 None 表示此权重在自定义实现中无对应（跳过）。
-    """
-    k = hf_key
+# ===== train.py 里的工具函数：HF -> 自定义 =====
+import os, json, re
+from typing import Optional, Dict
+import torch
+import torch.nn as nn
 
-    # 1) 去掉顶层前缀
-    k = strip_prefix(k, "model.")          # model.encoder... -> encoder...
-    # 2) encoder -> 顶层
-    k = strip_prefix(k, "encoder.")        # encoder.blocks.0.* -> blocks.0.*
+# 若已有同名函数，可删掉这里
+def strip_prefix(s: str, prefix: str) -> str:
+    return s[len(prefix):] if s.startswith(prefix) else s
 
-    # 3) embeddings 区
-    k = k.replace("embeddings.patch_embeddings.projection.", "patch_embed.proj.")
-    k = k.replace("embeddings.position_embeddings", "pos_embed")
-    k = k.replace("embeddings.mask_token", "mask_token")
-    # 下面三个是你自定义里的 token 命名；若 HF 有对应键就能映射
-    k = k.replace("embeddings.segment_token_x", "segment_token_x")
-    k = k.replace("embeddings.segment_token_y", "segment_token_y")
-    k = k.replace("embeddings.type_token_cls", "type_token_cls")
-    k = k.replace("embeddings.type_token_ins", "type_token_ins")
+def safe_load(path: str, device="cpu") -> Dict[str, torch.Tensor]:
+    if path.endswith(".safetensors"):
+        from safetensors.torch import load_file as load_safetensors
+        return load_safetensors(path, device=device)
+    else:
+        return torch.load(path, map_location=device)
 
-    # 4) blocks 内部（基本一致）
-    # ... attn.qkv/proj, rel_pos_h/w, mlp.fc1/fc2, norm1/norm2 一般名字都相同
+# --------- 键名映射（HF -> 自定义） ----------
+import re
+from typing import Optional
 
-    # 5) decoder 区（HF: decoder.decoder_* ; 你：decoder_embed + decoder_pred Sequential[0,1,2,3]）
-    if k.startswith("decoder."):
-        k = k.replace("decoder.decoder_embed.", "decoder_embed.")
-        # conv / layernorm / head -> 顺序容器 0/1/3
-        k = k.replace("decoder.decoder_pred.conv.", "decoder_pred.0.")
-        k = k.replace("decoder.decoder_pred.layernorm.", "decoder_pred.1.")
-        k = k.replace("decoder.decoder_pred.head.", "decoder_pred.3.")
-        # 其它像 gelu 在 HF 里没有权重，不用管
+_LIDX = re.compile(r"^(?:model\.)?encoder\.(layers|layer|blocks)\.(\d+)\.(.*)$")
 
-    # 6) 可能还有 "layer" 命名差异（少见）：encoder.layers -> blocks
-    k = k.replace("layers.", "blocks.")
-
-    return k
-
-def build_custom_from_hf_config(cfg: dict) -> SegGPT:
+# --------- 按 HF config 构建自定义模型结构 ----------
+def build_custom_from_hf_config(cfg: dict) -> nn.Module:
     img_size   = tuple(cfg.get("image_size", [896, 448]))
     patch_size = cfg.get("patch_size", 16)
     embed_dim  = cfg.get("hidden_size", 1024)
@@ -84,8 +71,9 @@ def build_custom_from_hf_config(cfg: dict) -> SegGPT:
     use_rel    = cfg.get("use_relative_position_embeddings", True)
     pre_imsize = cfg.get("pretrain_image_size", 224)
     dec_dim    = cfg.get("decoder_hidden_size", 64)
-    inter_idx  = cfg.get("intermediate_hidden_state_indices", [5,11,17,23])
+    inter_idx  = cfg.get("intermediate_hidden_state_indices", [5, 11, 17, 23])
 
+    # 这里的 SegGPT 类就是你自定义实现（已存在于项目中）
     model = SegGPT(
         img_size=img_size,
         patch_size=patch_size,
@@ -106,7 +94,7 @@ def build_custom_from_hf_config(cfg: dict) -> SegGPT:
         residual_block_indexes=(),
         use_act_checkpoint=False,
         pretrain_img_size=pre_imsize,
-        pretrain_use_cls_token=True,   # ✅ 打开 CLS，对应 HF 的 197 长度
+        pretrain_use_cls_token=True,   # 与 HF 的 pos_embed(197) 对齐
         out_feature="last_feat",
         decoder_embed_dim=dec_dim,
         loss_func="smoothl1",
@@ -114,82 +102,71 @@ def build_custom_from_hf_config(cfg: dict) -> SegGPT:
     )
     return model
 
+# --------- 读取 HF safetensors -> 映射 -> 过滤 -> 加载 ----------
+def load_hf_safetensors_into_custom(ckpt_dir: str, device="cpu") -> nn.Module:
+    cfg_path = os.path.join(ckpt_dir, "config.json")
+    hf_path  = os.path.join(ckpt_dir, "model.safetensors")
 
-def load_hf_safetensors_into_custom(ckpt_dir: str, device="cpu") -> SegGPT:
-    # 1) 读 HF config
-    cfg = json.load(open(os.path.join(ckpt_dir, "config.json"), "r"))
-    # 2) 构建自定义模型（结构对齐）
-    model = build_custom_from_hf_config(cfg)
-    model = model.to(device)
+    cfg = json.load(open(cfg_path, "r"))
+    model = build_custom_from_hf_config(cfg).to(device)
+    hf_sd = safe_load(hf_path, device="cpu")
 
-    # 3) 载入 HF 权重
-    hf_sd = safe_load(os.path.join(ckpt_dir, "model.safetensors"), device="cpu")
-
-    # 4) 按映射规则生成“自定义命名”的 state_dict
-    mapped = {}
-    miss    = []
+    # 映射键名
+    mapped: Dict[str, torch.Tensor] = {}
     for k, v in hf_sd.items():
         newk = map_hf_key_to_custom(k)
-        if newk is None:
-            miss.append(k); continue
-        mapped[newk] = v
+        if newk is not None:
+            mapped[newk] = v
 
-    # 4.x) pos_embed 自适配（必须在过滤前）
-    model_sd = model.state_dict()  # 提前拿到目标形状
+    # pos_embed 兜底（CLS 长度差 1 的情况）
+    model_sd = model.state_dict()
     if "pos_embed" in mapped and "pos_embed" in model_sd:
         pe = mapped["pos_embed"]
         need = model_sd["pos_embed"].shape[1]
         have = pe.shape[1]
         if have != need and abs(have - need) == 1:
-            if have > need:
-                # 多了 CLS：去掉第一个 token
+            if have > need:  # 多一个 CLS
                 mapped["pos_embed"] = pe[:, 1:, :]
-            else:
-                # 少了 CLS：在最前面补一个全零 token
+            else:            # 少一个 CLS
                 pad = torch.zeros(pe.shape[0], 1, pe.shape[2], dtype=pe.dtype)
                 mapped["pos_embed"] = torch.cat([pad, pe], dim=1)
-    # 5) 只保留模型里存在的键（避免 shape/key 冲突）
-    model_sd = model.state_dict()
+
+    # 过滤：仅加载模型里存在且形状一致的键
     filtered = {}
-    skipped_shape = []
     for k, v in mapped.items():
         if k in model_sd and model_sd[k].shape == v.shape:
             filtered[k] = v
-        else:
-            if k not in model_sd:
-                miss.append(k)
-            else:
-                skipped_shape.append((k, tuple(v.shape), tuple(model_sd[k].shape)))
 
-    # 6) load（strict=False），并打印命中统计
+    # 加载
     missing, unexpected = model.load_state_dict(filtered, strict=False)
+
+    # 补齐四个 token：若 HF 无提供且当前为全零，用 mask_token 初始化
+    with torch.no_grad():
+        msd = model.state_dict()
+        if "mask_token" in msd:
+            for t in ["segment_token_x", "segment_token_y", "type_token_cls", "type_token_ins"]:
+                if t in msd and torch.count_nonzero(msd[t]) == 0:
+                    msd[t].copy_(msd["mask_token"])
 
     hit = len(filtered)
     total = len(model_sd)
-    print(f"[HF->Custom] loaded={hit}/{total} params")
-    if skipped_shape:
-        print("[HF->Custom] shape-mismatch keys (skip):")
-        for k, hs, ms in skipped_shape[:20]:
-            print(f"  - {k}: hf{hs} vs model{ms}")
-        if len(skipped_shape) > 20:
-            print(f"  ... and {len(skipped_shape)-20} more")
+    print(f"[HF->Custom] mapped={len(mapped)} loaded={hit} / model_params={total}")
     if missing:
-        print(f"[HF->Custom] missing in provided dict: {len(missing)} (model expected but not provided)")
-        print("  e.g.", missing[:10])
+        print(f"[HF->Custom] still-missing: {len(missing)}  e.g. {missing[:10]}")
     if unexpected:
-        print(f"[HF->Custom] unexpected: {len(unexpected)} (provided but model unused)")
-        print("  e.g.", unexpected[:10])
+        print(f"[HF->Custom] unexpected: {len(unexpected)}  e.g. {unexpected[:10]}")
 
-    # 7) 额外一致性检查（decoder 输入维是否与 indices 个数一致）
+    # 可选一致性检查（如果你的 decoder_embed 固定用4个中间层拼接）
+    inter_idx = cfg.get("intermediate_hidden_state_indices", [5,11,17,23])
     if isinstance(model.decoder_embed, nn.Linear):
         embed_dim = model._out_feature_channels[model._out_features[0]]
-        expect_in = embed_dim * len(cfg.get("intermediate_hidden_state_indices", [5,11,17,23]))
+        expect_in = embed_dim * len(inter_idx)
         if model.decoder_embed.in_features != expect_in:
             raise RuntimeError(
                 f"decoder_embed.in_features={model.decoder_embed.in_features} "
-                f"but expect {expect_in} (=embed_dim*#indices). "
-                f"请确认 SegGPT 构造时已按 indices 个数设置 decoder 输入维。"
+                f"but expect {expect_in} (=embed_dim*#indices)."
             )
+
     return model
 
 
