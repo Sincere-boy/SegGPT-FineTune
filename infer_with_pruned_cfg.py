@@ -3,6 +3,7 @@ import sys
 sys.path.append('SegGPT/SegGPT_inference')
 
 import os, json, argparse
+from pathlib import Path
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -314,9 +315,59 @@ def get_args():
     p.add_argument("--image", type=str, required=True, help="待分割图")
     p.add_argument("--prompt-image", type=str, required=True, help="单张 prompt 图")
     p.add_argument("--prompt-mask", type=str, required=True, help="prompt 的灰度掩码(0/255)")
-    p.add_argument("--out", type=str, required=True, help="输出路径，如 outputs/pred.png")
+    p.add_argument("--out", type=str, default="", help="输出路径(仅单图时使用)，如 outputs/pred.png；若 --image 是目录则忽略")
     p.add_argument("--device", type=str, default="cuda")
     return p.parse_args()
+
+
+# 目录/批处理工具
+SUPPORTED_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
+
+def is_image_file(p: Path) -> bool:
+    return p.is_file() and p.suffix.lower() in SUPPORTED_EXTS
+
+
+def process_path(model, device, image_path: str, prompt_image_path: str, prompt_mask_path: str, out_path: str, ckpt_path: str):
+    p = Path(image_path)
+    if p.is_file():
+        # 单图：沿用原有 out_path 行为
+        if not out_path:
+            raise ValueError("单图推理需提供 --out 输出路径")
+        run_one_image_single_prompt(
+            model, device,
+            image_path=str(p),
+            prompt_image_path=prompt_image_path,
+            prompt_mask_path=prompt_mask_path,
+            out_path=out_path,
+        )
+        return
+
+    if p.is_dir():
+        # 批处理：输出目录 = outputs/<ckpt 文件名去后缀>/
+        ckpt_stem = Path(ckpt_path).name
+        if ckpt_stem.endswith(".pt"):
+            ckpt_stem = ckpt_stem[:-3]
+        out_dir = Path("outputs") / ckpt_stem
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        # 遍历目录中的所有图片（递归或非递归：此处非递归，仅当前目录）
+        files = sorted([q for q in p.iterdir() if is_image_file(q)])
+        if not files:
+            raise FileNotFoundError(f"目录 {p} 中未找到图片：支持扩展名 {sorted(SUPPORTED_EXTS)}")
+        for img_p in files:
+            out_name = img_p.stem + "_pred.png"
+            out_file = out_dir / out_name
+            run_one_image_single_prompt(
+                model, device,
+                image_path=str(img_p),
+                prompt_image_path=prompt_image_path,
+                prompt_mask_path=prompt_mask_path,
+                out_path=str(out_file),
+            )
+        print(f"[batch] done. results saved under: {out_dir}")
+        return
+
+    raise FileNotFoundError(f"未找到路径：{image_path}")
 
 
 def main():
@@ -329,14 +380,15 @@ def main():
     # 2) 加载微调 .pt
     model = load_finetuned_pt(model, args.ckpt, device)
 
-    # 3) 单 prompt 推理
+    # 3) 单/批 推理：--image 可为单文件或目录
     with torch.no_grad():
-        run_one_image_single_prompt(
+        process_path(
             model, device,
             image_path=args.image,
             prompt_image_path=args.prompt_image,
             prompt_mask_path=args.prompt_mask,
             out_path=args.out,
+            ckpt_path=args.ckpt,
         )
 
 
@@ -347,9 +399,17 @@ if __name__ == "__main__":
 python infer_with_pruned_cfg.py \
   --ckpt logs/1756021706/weights/best.pt \
   --pruned-dir pruned/pruned_seggpt_50 \
-  --image data/train/images/shui1_0.png \
-  --prompt-image data/save4_2.jpeg \
-  --prompt-mask  data/save4_2_mask.jpeg \
-  --out outputs/pred.png \
+  --image data/0820/shui1_0.png \
+  --prompt-image data/0820/shui1_0.png \
+  --prompt-mask  data/0820_mask/shui1_0.png \
+  --out outputs/pred_142.png \
   --device cuda
+
+  python infer_with_pruned_cfg.py \
+  --ckpt logs/1756021706/weights/best.pt \
+  --pruned-dir pruned/pruned_seggpt_50 \
+  --image data/0820/            # 这里是目录
+  --prompt-image data/0820/shui1_0.png \
+  --prompt-mask  data/0820_mask/shui1_0.png \
+  --device cuda                 # 批量时不用 --out
 '''
