@@ -198,7 +198,8 @@ def main(rank: int, world_size: int, train_args: Dict, port: int):
 
     logger.info('Instantiating model and trainer agent')
 
-    ckpt_dir = "/root/projects/SegGPT-FineTune/pruned/pruned_seggpt_50"  # 里面有 model.safetensors + config.json
+    # ckpt_dir = "/root/projects/SegGPT-FineTune/pruned/pruned_seggpt_50"  # 里面有 model.safetensors + config.json
+    ckpt_dir = train_args.get('pruned_dir')
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = load_hf_safetensors_into_custom(ckpt_dir, device=device)
     
@@ -211,11 +212,17 @@ def main(rank: int, world_size: int, train_args: Dict, port: int):
         model.load_state_dict(initial_ckpt['model'], strict=False)
         logger.info('Initial checkpoint loaded')
 
+    # ✅ 只微调 ViT 后的层
+    model.freeze_vit_and_enable_decoder(verbose=True)
+
     trainer = Agent(model, rank, train_args)
     logger.info(f'Using {T.cuda.device_count()} GPU(s)')
     if 'model_path' in train_args:
         trainer.load_checkpoint(train_args['model_path'])
 
+    num_tr = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    logger.info(f"Trainable params: {num_tr:,}")
+    
     logger.info('Instantiating dataloader')
     train_dataloader = T.utils.data.DataLoader(
         train_dataset,

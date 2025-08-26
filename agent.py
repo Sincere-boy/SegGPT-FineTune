@@ -33,8 +33,9 @@ class Agent():
             self.uid = int(time.time())
 
         if not is_eval:
+            trainable_params = (p for p in self.model.parameters() if p.requires_grad)
             self.optim = T.optim.AdamW(
-                self.model.parameters(),
+                trainable_params,
                 lr=args['lr'],
                 betas=(0.9, 0.999),
             )

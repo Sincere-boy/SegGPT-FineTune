@@ -514,6 +514,33 @@ class SegGPT(nn.Module):
                 nn.init.xavier_uniform_(self.decoder_embed.weight)
                 if self.decoder_embed.bias is not None:
                     nn.init.zeros_(self.decoder_embed.bias)
+        
+    @torch.no_grad()
+    def freeze_vit_and_enable_decoder(self, verbose: bool = True):
+        """
+        冻结 ViT 主干（patch_embed/pos_embed/blocks/主干norm/各类token），
+        只开放 decoder（decoder_embed, decoder_pred）训练。
+        """
+        # 1) 先全部冻结
+        for p in self.parameters():
+            p.requires_grad = False
+
+        # 2) 放开“ViT 后面的层”
+        for n, p in self.named_parameters():
+            if n.startswith("decoder_embed") or n.startswith("decoder_pred"):
+                p.requires_grad = True
+
+        # 如果你希望 decoder 之前的 self.norm 也参与微调（一般不需要），可解开下面两行：
+        # for n, p in self.named_parameters():
+        #     if n == "norm.weight" or n == "norm.bias":
+        #         p.requires_grad = True
+
+        if verbose:
+            trainable = [n for n, p in self.named_parameters() if p.requires_grad]
+            frozen    = [n for n, p in self.named_parameters() if not p.requires_grad]
+            print(f"[freeze] trainable tensors: {len(trainable)}")
+            print(f"[freeze] e.g. {trainable[:10]}")
+            print(f"[freeze] frozen tensors: {len(frozen)}")
 
 
 

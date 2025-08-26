@@ -396,20 +396,20 @@ if __name__ == "__main__":
     main()
 
 '''
-python infer_with_pruned_cfg.py \
-  --ckpt /root/autodl-tmp/logs/1756112893/weights/best.pt \
-  --pruned-dir pruned/pruned_seggpt_30_2 \
-  --image data/0820/shui1_9.png \
-  --prompt-image data/train/images/shui1_0.png \
-  --prompt-mask  data/train/labels/shui1_0.png \
+python infer_with_full.py \
+  --ckpt pruned/seggpt_vit_large.pth \
+  --pruned-dir pruned/seggpt-vit-large \
+  --image data/0820/shui1_2.png \
+  --prompt-image data/0820/shui1_0.png \
+  --prompt-mask  data/0820_mask/shui1_0.png \
   --out outputs/pred_30_2.png \
   --device cuda
 
-python infer_with_pruned_cfg.py \
-  --ckpt /root/autodl-tmp/logs/1756112893/weights/best.pt \
-  --pruned-dir pruned/pruned_seggpt_30_2 \
-  --image data/val/images \
-  --prompt-image data/train/images/shui1_0.png \
-  --prompt-mask  data/train/labels/shui1_0.png \
-  --device cuda
+  python infer_with_pruned_cfg.py \
+  --ckpt logs/1756021706/weights/best.pt \
+  --pruned-dir pruned/pruned_seggpt_50 \
+  --image data/0820/            # 这里是目录
+  --prompt-image data/0820/shui1_0.png \
+  --prompt-mask  data/0820_mask/shui1_0.png \
+  --device cuda                 # 批量时不用 --out
 '''
